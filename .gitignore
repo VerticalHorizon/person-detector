@@ -1,0 +1,20 @@
+# venv and Python cruft
+venv/
+pycache/
+*.pyc
+
+# IDE
+.idea/
+
+# models fetched by setup.sh
+detect.tflite
+labelmap.txt
+
+# Caffe weights (23 MB, downloaded manually — see README)
+*.caffemodel
+
+# detector output
+person_*.jpg
+
+# lgpio runtime FIFO
+.lgd-nfy0
