@@ -23,9 +23,9 @@ def _find(pattern):
 net = cv2.dnn.readNetFromCaffe(_find("*.prototxt"), _find("*.caffemodel"))
 
 
-def detect(frame):
-    """BGR frame -> ([(score, box)], best raw person score)."""
-    net.setInput(cv2.dnn.blobFromImage(frame, 0.007843, (300, 300), 127.5))
+def detect(small):
+    """Small BGR frame -> ([(score, norm box)], best raw person score)."""
+    net.setInput(cv2.dnn.blobFromImage(small, 0.007843, (300, 300), 127.5))
     detections = net.forward()[0, 0]   # rows: id, class, score, x1, y1, x2, y2
 
     persons, best_raw = [], 0.0
@@ -35,9 +35,8 @@ def detect(frame):
         best_raw = max(best_raw, float(score))
         if score < common.CONF_THRES:
             continue
-        box = common.clip_box(frame.shape, xmin, ymin, xmax, ymax)
-        if box:
-            persons.append((float(score), box))
+        persons.append((float(score), (float(xmin), float(ymin),
+                                       float(xmax), float(ymax))))
     return persons, best_raw
 
 

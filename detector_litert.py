@@ -22,11 +22,10 @@ out = interpreter.get_output_details()
 in_h, in_w = int(inp["shape"][1]), int(inp["shape"][2])
 
 
-def detect(frame):
-    """BGR frame -> ([(score, box)], best raw person score)."""
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    interpreter.set_tensor(inp["index"],
-                           np.expand_dims(cv2.resize(rgb, (in_w, in_h)), 0))
+def detect(small):
+    """Small BGR frame -> ([(score, norm box)], best raw person score)."""
+    rgb = cv2.cvtColor(cv2.resize(small, (in_w, in_h)), cv2.COLOR_BGR2RGB)
+    interpreter.set_tensor(inp["index"], np.expand_dims(rgb, 0))
     interpreter.invoke()
     boxes   = interpreter.get_tensor(out[0]["index"])[0]
     classes = interpreter.get_tensor(out[1]["index"])[0]
@@ -39,9 +38,7 @@ def detect(frame):
         best_raw = max(best_raw, float(score))
         if score < common.CONF_THRES:
             continue
-        box = common.clip_box(frame.shape, xmin, ymin, xmax, ymax)
-        if box:
-            persons.append((float(score), box))
+        persons.append((float(score), (xmin, ymin, xmax, ymax)))
     return persons, best_raw
 
 

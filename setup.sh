@@ -15,7 +15,8 @@ MODEL_URL="https://storage.googleapis.com/download.tensorflow.org/models/tflite/
 echo "[1/4] Packages"
 apt-get update
 apt-get install -y --no-install-recommends python3-picamera2
-apt-get install -y python3-opencv python3-venv python3-gpiozero python3-smbus wget git unzip
+apt-get install -y --no-install-recommends \
+  python3-opencv python3-venv python3-gpiozero wget unzip
 
 echo "[2/4] Virtualenv + LiteRT"
 sudo -u "$USER_NAME" python3 -m venv --system-site-packages "$DIR/venv"

@@ -1,9 +1,16 @@
 """Shared core for the person detector: settings, camera, episode loop.
 
-A detector backend supplies a ``detect(frame) -> (persons, best_raw)``
-callable and passes it to ``run()``.  ``persons`` is a list of
-``(score, (x1, y1, x2, y2))`` pixel boxes, ``best_raw`` is the best raw
-person score seen in the frame (diagnostics only).
+A detector backend supplies a ``detect(small) -> (persons, best_raw)``
+callable and passes it to ``run()``.  ``small`` is a low-resolution BGR
+frame (already rotated upright), ``persons`` is a list of
+``(score, (xmin, ymin, xmax, ymax))`` normalized boxes in that rotated
+space, ``best_raw`` is the best raw person score seen in the frame
+(diagnostics only).
+
+Pi Zero 2 W notes: detection runs on the camera ISP's hardware-scaled
+``lores`` stream, so the full-resolution frame is never copied, resized
+or rotated in software unless a person is actually in view.  Only small
+images and final crops are rotated.
 """
 
 import os
@@ -19,10 +26,12 @@ from picamera2 import Picamera2
 
 # --------------- settings ---------------
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
+SAVE_DIR     = os.path.join(SCRIPT_DIR, "captures")
 
 BUZZER_GPIO  = 17                 # BCM numbering (physical pin 11)
 CONF_THRES   = 0.5                # detection confidence threshold
-CAMERA_SIZE  = (1280, 720)        # sensor stream, before rotation
+CAMERA_SIZE  = (1280, 720)        # main stream (crop source), before rotation
+LORES_SIZE   = (320, 320)         # ISP-scaled detection stream (YUV420)
 ROTATION     = cv2.ROTATE_90_COUNTERCLOCKWISE   # None to disable
 ABSENCE_SEC  = 3.0                # seconds without a person = episode end
 MIN_BOX_SIDE = 40                 # ignore boxes smaller than this (px)
@@ -30,9 +39,23 @@ JPEG_QUALITY = 90
 STATS_EVERY  = 20                 # log FPS/temp/score every N frames
 # ----------------------------------------
 
+# main-frame shape (h, w) as delivered by the camera, before rotation
+MAIN_SHAPE = (CAMERA_SIZE[1], CAMERA_SIZE[0])
+
 
 def log(msg):
     print(msg, flush=True)        # journald adds timestamps
+
+
+def unrotate_box(xmin, ymin, xmax, ymax):
+    """Normalized box in rotated space -> normalized box in camera space."""
+    if ROTATION == cv2.ROTATE_90_COUNTERCLOCKWISE:
+        return 1.0 - ymax, xmin, 1.0 - ymin, xmax
+    if ROTATION == cv2.ROTATE_90_CLOCKWISE:
+        return ymin, 1.0 - xmax, ymax, 1.0 - xmin
+    if ROTATION == cv2.ROTATE_180:
+        return 1.0 - xmax, 1.0 - ymax, 1.0 - xmin, 1.0 - ymin
+    return xmin, ymin, xmax, ymax
 
 
 def clip_box(shape, xmin, ymin, xmax, ymax):
@@ -50,7 +73,7 @@ def crop_quality(frame, box, score):
     x1, y1, x2, y2 = box
     crop = frame[y1:y2, x1:x2]
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+    sharpness = cv2.Laplacian(gray, cv2.CV_16S).var()
     area = (x2 - x1) * (y2 - y1) / (frame.shape[0] * frame.shape[1])
     return score * (1.0 + area) * log1p(sharpness), crop
 
@@ -64,10 +87,16 @@ def cpu_temp():
 
 
 def start_camera():
-    """Picamera2 note: format "RGB888" yields BGR arrays - OpenCV order."""
+    """Picamera2 note: format "RGB888" yields BGR arrays - OpenCV order.
+
+    The lores stream is scaled by the ISP for free; on the Zero 2 W it
+    must be YUV420.
+    """
     picam2 = Picamera2()
     picam2.configure(picam2.create_video_configuration(
-        main={"size": CAMERA_SIZE, "format": "RGB888"}, buffer_count=3))
+        main={"size": CAMERA_SIZE, "format": "RGB888"},
+        lores={"size": LORES_SIZE, "format": "YUV420"},
+        buffer_count=3))
     picam2.start()
     time.sleep(1.5)               # let auto-exposure settle
     return picam2
@@ -75,6 +104,7 @@ def start_camera():
 
 def run(detect, engine):
     """Main loop: episodes, buzzer signal, best-crop saving."""
+    os.makedirs(SAVE_DIR, exist_ok=True)
     buzzer = Buzzer(BUZZER_GPIO)
     picam2 = start_camera()
 
@@ -89,7 +119,7 @@ def run(detect, engine):
         if best_crop is None:
             return
         name = f"person_{started:%Y%m%d_%H%M%S}.jpg"
-        path = os.path.join(SCRIPT_DIR, name)
+        path = os.path.join(SAVE_DIR, name)
         if cv2.imwrite(path, best_crop, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]):
             log(f"Saved {name}")
         else:
@@ -110,10 +140,25 @@ def run(detect, engine):
     log(f"Engine: {engine}, threshold {CONF_THRES}")
 
     while True:
-        frame = picam2.capture_array()
-        if ROTATION is not None:
-            frame = cv2.rotate(frame, ROTATION)
-        persons, raw = detect(frame)
+        # Hold the request through inference so the main frame stays
+        # available (and in sync with lores) if a crop is needed.
+        request = picam2.capture_request()
+        try:
+            small = cv2.cvtColor(request.make_array("lores"),
+                                 cv2.COLOR_YUV420p2BGR)
+            if ROTATION is not None:
+                small = cv2.rotate(small, ROTATION)
+            raw_persons, raw = detect(small)
+
+            persons = []
+            for score, nbox in raw_persons:
+                box = clip_box(MAIN_SHAPE, *unrotate_box(*nbox))
+                if box:
+                    persons.append((score, box))
+            frame = request.make_array("main") if persons else None
+        finally:
+            request.release()
+
         interval_raw = max(interval_raw, raw)
         now = time.monotonic()
 
@@ -128,7 +173,9 @@ def run(detect, engine):
             for score, box in persons:
                 q, crop = crop_quality(frame, box, score)
                 if q > best_q:
-                    best_q, best_crop = q, crop
+                    best_q = q
+                    best_crop = (cv2.rotate(crop, ROTATION)
+                                 if ROTATION is not None else crop.copy())
         elif episode and now - last_seen > ABSENCE_SEC:
             episode = False
             episodes += 1
