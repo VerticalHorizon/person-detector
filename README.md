@@ -1,4 +1,4 @@
-# Person Tracker
+# Person Detector
 
 Person detection on a Raspberry Pi Zero 2W with Camera Module 3.
 When a person enters the frame the buzzer beeps and the best crop of the
@@ -14,7 +14,7 @@ One episode = one appearance; the crops form a gallery for future re-ID.
 
 ## Install
 
-    cd ~/person_tracker
+    cd ~/person_detector
     sudo bash setup.sh
     sudo reboot
     journalctl -u person-detector -f
